@@ -33,10 +33,10 @@ temperature: 0.2
 mlp_dim: 128
 text_type: bert
 text_rep: caption
-disentangle: false
+disentangle: true
 freeze: false
 subset: true
-log: true
+log: false
 device: cuda
 distributed: false
 text_dim: 768

@@ -62,9 +62,14 @@ def get_parser():
     parser.add_argument("--text_rep", default="caption", type=str)
 
     # disentalngement
-    parser.add_argument("--disentangle", action='store_true')
+    parser.add_argument("--disentangle", default='', type=str)
     parser.add_argument("--freeze", action='store_true')
     parser.add_argument("--subset", action='store_true')
     parser.add_argument("--log", action='store_true')
+    parser.add_argument("--dropout", default=0.1, type=float)
+    parser.add_argument("--test", default="query", type=str)
+    parser.add_argument("--n_proj", default=1, type=int)
+    parser.add_argument("--name", default=None, type=str)
+    parser.add_argument("--save_path", default="mtr/exp", type=str)
 
     return parser

@@ -17,7 +17,7 @@ import time
 
 sys.path.append(Path(__file__).parent.parent.parent.as_posix())
 from dataset import ECALS_Dataset
-from config import get_parser
+from config import get_parser, CLUSTERS
 from model import ContrastiveModel
 from mtr.modules.audio_rep import TFRep
 from mtr.modules.tokenizer import ResFrontEnd, SpecPatchEmbed
@@ -97,21 +97,23 @@ def main_worker(args):
         text_dim= args.text_dim,
         mlp_dim= args.mlp_dim,
         temperature = args.temperature,
-        disentangle = args.disentangle
+        disentangle = args.disentangle,
+        n_proj = args.n_proj
     )
-    save_dir = f"exp/{args.text_type}_{args.text_rep}"
-    # save_dir = f"exp/{args.arch}_{args.frontend}_{args.mix_type}_{args.audio_rep}/{args.text_type}_{args.text_rep}"
-    # pretrained_object = torch.load(f'{save_dir}/best.pth', map_location='cpu')
-    # state_dict = pretrained_object['state_dict']
-    # for k in list(state_dict.keys()):
-    #     if k.startswith('module.'):
-    #         state_dict[k[len("module."):]] = state_dict[k]
-    #     del state_dict[k]
-    # model.load_state_dict(state_dict, strict=False)
+    save_dir = args.save_path
+    assert args.name is not None, "Please specify the model name"
+    pretrained_object = torch.load(f'{save_dir}/{args.name}.pth', map_location='cpu')
+    state_dict = pretrained_object['state_dict']
+    for k in list(state_dict.keys()):
+        if k.startswith('module.'):
+            state_dict[k[len("module."):]] = state_dict[k]
+        del state_dict[k]
+    model.load_state_dict(state_dict, strict=False)
 
     
     model = model.to(args.device)
     cudnn.benchmark = True
+    model.eval()
 
     test_dataset= ECALS_Dataset(
         data_path = args.data_path,
@@ -121,14 +123,39 @@ def main_worker(args):
         num_chunks = args.num_chunks,
         text_preprocessor= tokenizer,
         text_type=args.text_type,
-        text_rep = args.text_rep
+        text_rep = args.text_rep,
+        disentangle = args.disentangle,
+        subset = args.subset,
+        test_mode = args.test
     )
+
+    if args.test == 'query':
+        query(args, model, test_dataset, tokenizer, save_dir)
+    elif args.test == 'loss':
+        test_loss, audio_accs, text_accs = loss(test_dataset, model, args)
+
+        val_dataset = ECALS_Dataset(
+            data_path = args.data_path,
+            split = "VALID",
+            sr = args.sr,
+            duration = args.duration,
+            num_chunks = args.num_chunks,
+            text_preprocessor= tokenizer,
+            text_type=args.text_type,
+            text_rep = args.text_rep,
+            disentangle = args.disentangle,
+            subset = args.subset,
+            test_mode = args.test
+        )
+        val_loss, audio_accs, text_accs = loss(val_dataset, model, args)
+
+
+
+def query(args, model, test_dataset, tokenizer, save_dir):
     test_loader = torch.utils.data.DataLoader(
         test_dataset, batch_size=args.batch_size, shuffle=None,
         num_workers=args.workers, pin_memory=True, sampler=None, drop_last=False)
-
     multi_query_set = json.load(open(os.path.join(args.data_path, "multiquery_samples.json"),'r'))
-    model.eval()
     track_ids, audio_embs, groudturths, audio_dict, multi_query_dict = [], [], [], {}, {}
     for batch in tqdm(test_loader):
         audio = batch['audio']
@@ -191,6 +218,54 @@ def main_worker(args):
     # single_query_evaluation(sq_targets, sq_logits, save_dir, test_dataset.tags) # 1054 tag evaluation
     # multi_query_evaluation(tag_dict, multi_query_dict, save_dir) # multi_query evaluation
 
+def loss(dataset, model, args):
+    loader = torch.utils.data.DataLoader(
+        dataset, batch_size=args.batch_size, shuffle=None, collate_fn=dataset.batch_processor,
+        num_workers=args.workers, pin_memory=True, sampler=None, drop_last=False)
+    epoch_end_loss, audio_corrects, text_corrects, cluster_count = [], [], [], []
+    for batch in tqdm(loader):
+        audio = batch['audio']
+        text = batch['text']
+        text_mask = batch['text_mask']
+        cluster_mask = batch['cluster_mask']
+        cluster_count.append(cluster_mask.sum(dim=0))
+        if args.device == 'cuda':
+            audio = audio.to(args.device, non_blocking=True)
+            text = text.to(args.device, non_blocking=True)
+            if torch.is_tensor(text_mask):
+                text_mask = text_mask.to(args.device, non_blocking=True)
+            if torch.is_tensor(cluster_mask):
+                cluster_mask = cluster_mask.to(args.device, non_blocking=True)
+        with torch.no_grad():
+            loss, audio_correct, text_correct, _ = model(audio, text, text_mask, cluster_mask)
+        epoch_end_loss.append(loss.detach().cpu())
+        audio_corrects.append(audio_correct.detach().cpu())
+        text_corrects.append(text_correct.detach().cpu())
+    val_loss = torch.stack(epoch_end_loss).mean(0, False)
+    audio_corrects = torch.stack(audio_corrects).sum(0, False)
+    text_corrects = torch.stack(text_corrects).sum(0, False)
+    
+    if args.disentangle:
+        cluster_count = torch.stack(cluster_count).sum(dim=0)
+        weight = cluster_count / cluster_count.sum()
+        audio_acc = audio_corrects / cluster_count
+        text_acc = text_corrects / cluster_count
+        avg_audio_acc = audio_acc.mean()
+        avg_text_acc = text_acc.mean()
+        wavg_audio_acc = (audio_acc * weight).sum()
+        wavg_text_acc = (text_acc * weight).sum()
+        print(f"Loss: {val_loss}")
+        print(f"Audio Acc: {avg_audio_acc}, Text Acc: {avg_text_acc}")
+        print(f"Weighted Audio Acc: {wavg_audio_acc}, Weighted Text Acc: {wavg_text_acc}")
+        for i, c in enumerate(CLUSTERS):
+            print(f"{c}: Audio Acc: {audio_acc[i]}, Text Acc: {text_acc[i]}")
+    else:
+        audio_acc /= len(loader.dataset)
+        text_acc /= len(loader.dataset)
+        print(f"Loss: {val_loss}")
+        print(f"Audio Acc: {audio_acc}, Text Acc: {text_acc}")
+
+    return val_loss, audio_acc, text_acc
 
 if __name__ == '__main__':
     main()
