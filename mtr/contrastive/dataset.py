@@ -119,6 +119,9 @@ class ECALS_Dataset(Dataset):
         output: texts = dict of cluster to string of text
                 cluster_mask = binary mask of cluster
         """
+
+        # ordinarily the
+        # for elastic disentanglement
         texts = dict()
         cluster_mask = []
         for cluster in CLUSTERS:

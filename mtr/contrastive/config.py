@@ -72,4 +72,8 @@ def get_parser():
     parser.add_argument("--name", default=None, type=str)
     parser.add_argument("--save_path", default="mtr/exp", type=str)
 
+    parser.add_argument("--elastic_disentangle", default='', type=str)
+    parser.add_argument("--ed_S", default='2', type=int)
+
+
     return parser
